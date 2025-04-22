@@ -1,0 +1,216 @@
+name: Deploy React App to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-north-1
+  ECR_REPOSITORY: qualy-taste-fe
+  CONTAINER_NAME: react-app-ec
+  CONTAINER_PORT: 80
+  HOST_PORT: 80
+  HEALTH_CHECK_PATH: /
+
+jobs:
+  setup-ec2:
+    name: Setup Docker on EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Set up SSH key
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+      - name: Ensure Docker is installed on EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << 'EOF'
+            set -e
+            if ! command -v docker &> /dev/null; then
+              echo "Installing Docker..."
+              sudo yum update -y
+              sudo yum install -y docker
+              sudo systemctl start docker
+              sudo systemctl enable docker
+              sudo usermod -aG docker ec2-user
+              echo "Docker installed."
+            else
+              echo "Docker already installed."
+            fi
+            docker --version
+          EOF
+
+  build-and-push:
+    name: Build and Push Docker Image to ECR
+    needs: setup-ec2
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    outputs:
+      version: ${{ steps.extract_version.outputs.version }}
+      image_uri: ${{ steps.push_image.outputs.image_uri }}
+      ecr_registry: ${{ steps.ecr-login.outputs.registry }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Cache node modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.npm
+            node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Extract version from package.json
+        id: extract_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Docker Image
+        id: push_image
+        env:
+          IMAGE_TAG: ${{ steps.extract_version.outputs.version }}
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE_URI=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker build -t $IMAGE_URI .
+          docker tag $IMAGE_URI $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+          # Push both tags
+          docker push $IMAGE_URI
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "Image successfully pushed to ECR: $IMAGE_URI"
+
+  deploy-to-ec2:
+    name: Deploy to EC2
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Set up SSH key
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy Application to EC2
+        env:
+          ECR_REGISTRY: ${{ needs.build-and-push.outputs.ecr_registry }}
+          IMAGE_URI: ${{ needs.build-and-push.outputs.image_uri }}
+        run: |
+          #          # Create temporary AWS credentials file
+          #          mkdir -p ~/.aws
+          #          cat > ~/.aws/credentials << EOL
+          #          [default]
+          #          aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}
+          #          aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          #          region=${{ env.AWS_REGION }}
+          #          EOL
+          #
+          #          # First, ensure .aws directory exists on EC2
+          #          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} "mkdir -p ~/.aws"
+          #
+          #          # Copy AWS credentials to EC2
+          #          scp -o StrictHostKeyChecking=no ~/.aws/credentials ec2-user@${{ secrets.EC2_PUBLIC_IP }}:~/.aws/credentials
+
+          # Generate ECR auth token
+               ECR_AUTH_TOKEN=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          
+               ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << EOF
+               set -e
+          
+               export CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
+               export IMAGE_URI="${IMAGE_URI}"
+               export AWS_REGION="${{ env.AWS_REGION }}"
+               export CONTAINER_PORT="${{ env.CONTAINER_PORT }}"
+               export HOST_PORT="${{ env.HOST_PORT }}"
+          
+          # Login to ECR using the token
+               echo "$ECR_AUTH_TOKEN" | docker login --username AWS --password-stdin $ECR_REGISTRY
+          
+               echo "Stopping old container, with CONTAINER_NAME: \$CONTAINER_NAME"
+               docker stop $CONTAINER_NAME || true
+               docker rm -f $CONTAINER_NAME || true
+          
+               echo "Pulling new image from ECR, with IMAGE_URI: \$IMAGE_URI"
+               docker pull "$IMAGE_URI"
+          
+               echo "Ensuring app-network exists..."
+               docker network inspect app-network >/dev/null 2>&1 || docker network create app-network
+          
+               echo "Starting React container..."
+               docker run -d \
+               --name $CONTAINER_NAME \
+               --restart unless-stopped \
+               --network app-network \
+               --cpus="0.5" \
+               --memory="256m" \
+               --memory-swap="512m" \
+               -p $HOST_PORT:$CONTAINER_PORT \
+               $IMAGE_URI
+          
+               echo "Deployment complete. Showing logs:"
+               docker ps -a
+               docker logs \$CONTAINER_NAME --tail 50
+               EOF
+
+      #          # Clean up the temporary credentials file from both local and remote
+      #          rm -f ~/.aws/credentials
+      #          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} "rm -f ~/.aws/credentials"
+
+      - name: Verify Deployment
+        run: |
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << 'EOF'
+            set -e
+            echo "Waiting for container to stabilize..."
+            sleep 10
+
+            echo "Checking container status..."
+            if ! docker ps --filter "name=${{ env.CONTAINER_NAME }}" | grep Up; then
+              echo "::error::Container failed to start"
+              docker logs ${{ env.CONTAINER_NAME }} --tail 50
+              exit 1
+            fi
+
+            echo "Performing health check..."
+            if ! curl -sSf "http://localhost:${{ env.HOST_PORT }}${{ env.HEALTH_CHECK_PATH }}"; then
+              echo "::error::Health check failed"
+              exit 1
+            fi
+
+            echo "Deployment verification successful"
+          EOF

@@ -193,7 +193,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} "rm -f ~/.aws/credentials"
 
       - name: Verify Deployment
-        run: |
+        run: | 
           ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << EOF
             set -e
             echo "Waiting for container to stabilize..."

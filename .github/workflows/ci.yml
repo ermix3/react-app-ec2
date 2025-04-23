@@ -50,8 +50,6 @@ jobs:
 
     outputs:
       version: ${{ steps.extract_version.outputs.version }}
-      image_uri: ${{ steps.push_image.outputs.image_uri }}
-      ecr_registry: ${{ steps.ecr-login.outputs.registry }}
 
     steps:
       - name: Checkout Code
@@ -82,24 +80,21 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Log in to Amazon ECR
-        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and Push Docker Image
         id: push_image
         env:
           IMAGE_TAG: ${{ steps.extract_version.outputs.version }}
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          IMAGE_URI=$ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:$IMAGE_TAG
+          IMAGE_URI=${{ secrets.ECR_REGISTRY }}:$IMAGE_TAG
           docker build -t $IMAGE_URI .
-          docker tag $IMAGE_URI $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+          docker tag $IMAGE_URI ${{ secrets.ECR_REGISTRY }}:latest
 
           # Push both tags
           docker push $IMAGE_URI
-          docker push $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+          docker push ${{ secrets.ECR_REGISTRY }}:latest
 
-          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "Image successfully pushed to ECR: $IMAGE_URI"
 
   deploy-to-ec2:
@@ -122,50 +117,33 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Log in to Amazon ECR
-        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Deploy Application to EC2
-        env:
-          ECR_REGISTRY: ${{ needs.build-and-push.outputs.ecr_registry }}
-          IMAGE_URI: ${{ needs.build-and-push.outputs.image_uri }}
         run: |
-          # Create temporary AWS credentials file
-          mkdir -p ~/.aws
-          cat > ~/.aws/credentials << EOL
-          [default]
-          aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          region=${{ secrets.AWS_REGION }}
-          EOL
-
-          # First, ensure .aws directory exists on EC2
-          ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_SSH_USERNAME }}@${{ secrets.EC2_PUBLIC_IP }} "mkdir -p ~/.aws"
-
-          # Copy AWS credentials to EC2
-          scp -o StrictHostKeyChecking=no ~/.aws/credentials ${{ secrets.EC2_SSH_USERNAME }}@${{ secrets.EC2_PUBLIC_IP }}:~/.aws/credentials
-
-          # Generate ECR auth token
-          ECR_AUTH_TOKEN=$(aws ecr get-login-password --region ${{ secrets.AWS_REGION }})
-          
           ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_SSH_USERNAME }}@${{ secrets.EC2_PUBLIC_IP }} << EOF
              set -e
           
              export CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
-             export IMAGE_URI="${IMAGE_URI}"
-             export AWS_REGION="${{ secrets.AWS_REGION }}"
              export CONTAINER_PORT="${{ env.CONTAINER_PORT }}"
              export HOST_PORT="${{ env.HOST_PORT }}"
-          
+             
+             export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+             export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+             export AWS_REGION="${{ secrets.AWS_REGION }}"
+             export ECR_IMAGE="${{ secrets.ECR_REGISTRY }}:latest"
+             
              # Login to ECR using the token
-             echo "$ECR_AUTH_TOKEN" | docker login --username AWS --password-stdin $ECR_REGISTRY
-          
+             aws ecr get-login-password \
+               --region $AWS_REGION | \
+               docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}
+             
              echo "Stopping old container, with CONTAINER_NAME: \$CONTAINER_NAME"
              docker stop $CONTAINER_NAME || true
              docker rm -f $CONTAINER_NAME || true
           
-             echo "Pulling new image from ECR, with IMAGE_URI: \$IMAGE_URI"
-             docker pull "$IMAGE_URI"
+             echo "Pulling new image from ECR, with ECR_IMAGE: \$ECR_IMAGE"
+             docker pull "$ECR_IMAGE"
           
              echo "Ensuring app-network exists..."
              docker network inspect app-network >/dev/null 2>&1 || docker network create app-network
@@ -180,7 +158,7 @@ jobs:
              --memory-swap="512m" \
              -e EC2_PUBLIC_IP="${{ secrets.EC2_PUBLIC_IP }}" \
              -p $HOST_PORT:$CONTAINER_PORT \
-             $IMAGE_URI
+             $ECR_IMAGE
           
             echo "Deployment complete. Showing logs:"
             docker ps -a

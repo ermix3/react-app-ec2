@@ -28,7 +28,7 @@ jobs:
 
       - name: Ensure Docker is installed on EC2
         run: |
-          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << EOF
             set -e
             if ! command -v docker &> /dev/null; then
               echo "Installing Docker..."
@@ -132,11 +132,27 @@ jobs:
           ECR_REGISTRY: ${{ needs.build-and-push.outputs.ecr_registry }}
           IMAGE_URI: ${{ needs.build-and-push.outputs.image_uri }}
         run: |
+          # Create temporary AWS credentials file
+          mkdir -p ~/.aws
+          cat > ~/.aws/credentials << EOL
+          [default]
+          aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          region=${{ env.AWS_REGION }}
+          EOL
+
+          # First, ensure .aws directory exists on EC2
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} "mkdir -p ~/.aws"
+
+          # Copy AWS credentials to EC2
+          scp -o StrictHostKeyChecking=no ~/.aws/credentials ec2-user@${{ secrets.EC2_PUBLIC_IP }}:~/.aws/credentials
+
           # Generate ECR auth token
           ECR_AUTH_TOKEN=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
           
-          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << EOF
              set -e
+             
              export CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
              export IMAGE_URI="${IMAGE_URI}"
              export AWS_REGION="${{ env.AWS_REGION }}"
@@ -171,10 +187,14 @@ jobs:
             docker ps -a
             docker logs \$CONTAINER_NAME --tail 50
           EOF
+          
+          # Clean up the temporary credentials file from both local and remote
+          rm -f ~/.aws/credentials
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} "rm -f ~/.aws/credentials"
 
       - name: Verify Deployment
         run: |
-          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_PUBLIC_IP }} << EOF
             set -e
             echo "Waiting for container to stabilize..."
             sleep 10

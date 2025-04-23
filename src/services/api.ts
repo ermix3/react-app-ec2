@@ -1,9 +1,9 @@
 import axios from "axios";
 import {Product, ProductFormData} from "../types";
 
-const BACKEND_CONATINER_NAME = "sb-app-ec";
-// const IP_BACKEND = "13.60.2.140";
-const API_BASE_URL = `http://${BACKEND_CONATINER_NAME}:8080/api/v1`;
+// const BACKEND_CONATINER_NAME = "sb-app-ec";
+const IP_BACKEND = "13.60.2.140";
+const API_BASE_URL = `http://${IP_BACKEND}:8080/api/v1`;
 
 const apiClient = axios.create({
     baseURL: API_BASE_URL,

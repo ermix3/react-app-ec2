@@ -158,7 +158,6 @@ jobs:
                --memory="256m" \
                --memory-swap="512m" \
                -e EC2_PUBLIC_IP="${{ secrets.EC2_PUBLIC_IP }}" \
-               -e NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/conf.d \
                -p $HOST_PORT:$CONTAINER_PORT \
                \$ECR_IMAGE
           

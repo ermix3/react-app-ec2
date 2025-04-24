@@ -151,16 +151,15 @@ jobs:
              docker network inspect \$NETWORK_NAME >/dev/null 2>&1 || docker network create \$NETWORK_NAME
           
              echo "Starting React container..."
-             docker run -d \
-             --name \$CONTAINER_NAME \
-             --restart unless-stopped \
-             --network \$NETWORK_NAME \
-             --cpus="0.5" \
-             --memory="256m" \
-             --memory-swap="512m" \
-             -e EC2_PUBLIC_IP="${{ secrets.EC2_PUBLIC_IP }}" \
-             -p $HOST_PORT:$CONTAINER_PORT \
-             $ECR_IMAGE
+             docker run -d --name \$CONTAINER_NAME \
+               --restart unless-stopped \
+               --network \$NETWORK_NAME \
+               --cpus="0.5" \
+               --memory="256m" \
+               --memory-swap="512m" \
+               -e EC2_PUBLIC_IP="${{ secrets.EC2_PUBLIC_IP }}" \
+               -p $HOST_PORT:$CONTAINER_PORT \
+               \$ECR_IMAGE
           
             echo "Deployment complete. Showing logs:"
             docker ps -a

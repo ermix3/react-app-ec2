@@ -7,6 +7,6 @@ RUN npm run build
 
 FROM nginx:stable-alpine-slim
 COPY --from=build /app/build /usr/share/nginx/html
-COPY nginx.conf.template /etc/nginx/templates/default.conf.template
-ENV EC2_PUBLIC_IP=localhost
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
